@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gate Controller Bridge WebApp</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f7f7f7;
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background: #fff;
+      padding: 20px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    h1, h2 {
+      text-align: center;
+    }
+    form {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    input, select, button {
+      width: 100%;
+      padding: 8px;
+      margin-top: 5px;
+      box-sizing: border-box;
+    }
+    pre {
+      background: #eee;
+      padding: 10px;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+    .log {
+      font-size: 0.9em;
+      color: #333;
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin-top: 20px;
+      height: 200px;
+      overflow-y: scroll;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Gate Controller Bridge</h1>
+    
+    <h2>Provision New Node</h2>
+    <form id="provisionForm">
+      <label for="token">Provision Token:</label>
+      <input type="text" id="token" name="token" placeholder="Auto-generated token" required>
+      
+      <label for="location">Location:</label>
+      <input type="text" id="location" name="location" placeholder="Enter node location" required>
+      
+      <label for="name">Node Name:</label>
+      <input type="text" id="name" name="name" placeholder="Enter node name" required>
+      
+      <button type="submit">Provision Node</button>
+    </form>
+    
+    <h2>Control Node</h2>
+    <form id="controlForm">
+      <label for="nodeId">Node ID:</label>
+      <input type="text" id="nodeId" name="nodeId" placeholder="Enter node ID" required>
+      
+      <label for="action">Action:</label>
+      <select id="action" name="action">
+        <option value="open">Open</option>
+        <option value="close">Close</option>
+      </select>
+      
+      <button type="submit">Send Command</button>
+    </form>
+    
+    <h2>Log Output</h2>
+    <div id="log" class="log"></div>
+  </div>
+  
+  <script>
+    // Master key must match the ESP8266 masterPSK.
+    const masterKeyHex = "0123456789abcdeffedcba9876543210";
+
+    // Convert hex string to Uint8Array.
+    function hexToBytes(hex) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < hex.length; i += 2) {
+        bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+      }
+      return bytes;
+    }
+    
+    // Convert ArrayBuffer to hex string.
+    function arrayBufferToHex(buffer) {
+      const bytes = new Uint8Array(buffer);
+      return Array.from(bytes)
+        .map(b => ('00' + b.toString(16)).slice(-2))
+        .join('');
+    }
+    
+    // Generate provision token:
+    // Time slot = floor(current Unix time (sec) / 300)
+    // Token = HMAC-SHA256 of 4-byte little-endian time slot.
+    async function generateProvisionToken() {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const timeSlot = Math.floor(nowSec / 300);
+      const timeSlotBuffer = new ArrayBuffer(4);
+      const view = new DataView(timeSlotBuffer);
+      view.setUint32(0, timeSlot, true); // little-endian
+      const keyData = hexToBytes(masterKeyHex);
+      const algo = { name: "HMAC", hash: "SHA-256" };
+      const cryptoKey = await crypto.subtle.importKey("raw", keyData, algo, false, ["sign"]);
+      const signature = await crypto.subtle.sign("HMAC", cryptoKey, timeSlotBuffer);
+      return arrayBufferToHex(signature);
+    }
+    
+    // Auto-fill the provision token field.
+    async function autofillProvisionToken() {
+      try {
+        const token = await generateProvisionToken();
+        document.getElementById('token').value = token;
+        logMessage("Auto-generated Provision Token: " + token);
+      } catch (e) {
+        logMessage("Error generating provision token: " + e);
+      }
+    }
+    
+    // Logging utility.
+    function logMessage(msg) {
+      const logEl = document.getElementById('log');
+      logEl.innerHTML += msg + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    
+    // Call autofill on page load.
+    window.addEventListener('load', autofillProvisionToken);
+    
+    // Define the base URL of the ESP8266 bridge.
+    const baseUrl = "http://192.168.4.1";
+    
+    // Provision form submission.
+    document.getElementById('provisionForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      const token = document.getElementById('token').value;
+      const location = document.getElementById('location').value;
+      const name = document.getElementById('name').value;
+      const payload = { token, location, name };
+      
+      logMessage("Sending provisioning request...");
+      fetch(baseUrl + "/provision", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      })
+      .then(response => {
+        logMessage("Provision response received.");
+        return response.arrayBuffer();
+      })
+      .then(data => {
+        const hex = Array.from(new Uint8Array(data))
+                         .map(b => ('00' + b.toString(16)).slice(-2))
+                         .join('');
+        logMessage("Provision Response (hex): " + hex);
+      })
+      .catch(err => {
+        logMessage("Provision Error: " + err);
+      });
+    });
+    
+    // Control form submission with HMAC.
+    document.getElementById('controlForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const nodeId = document.getElementById('nodeId').value;
+      const action = document.getElementById('action').value;
+      const payload = { id: nodeId, action: action };
+      const payloadStr = JSON.stringify(payload);
+      
+      try {
+        const keyData = hexToBytes(masterKeyHex);
+        const algo = { name: "HMAC", hash: "SHA-256" };
+        const cryptoKey = await crypto.subtle.importKey("raw", keyData, algo, false, ["sign"]);
+        const enc = new TextEncoder();
+        const msgBuffer = enc.encode(payloadStr);
+        const signature = await crypto.subtle.sign("HMAC", cryptoKey, msgBuffer);
+        const hmac = arrayBufferToHex(signature);
+        logMessage("Computed HMAC: " + hmac);
+        
+        logMessage("Sending control command: " + action + " to Node ID: " + nodeId);
+        fetch(baseUrl + "/control", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-HMAC": hmac
+          },
+          body: payloadStr
+        })
+        .then(response => {
+          logMessage("Control response received.");
+          return response.text();
+        })
+        .then(data => {
+          logMessage("Control Response: " + data);
+        })
+        .catch(err => {
+          logMessage("Control Error: " + err);
+        });
+      } catch (err) {
+        logMessage("Error computing HMAC: " + err);
+      }
+    });
+  </script>
+</body>
+</html>
